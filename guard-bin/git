@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/core.sh"
+if sgh_git_is_read_only "$@"; then
+  sgh_apply "$(sgh_current)"
+else
+  sgh_resolve
+fi
+# Override pre-existing credential helpers for github.com HTTPS remotes.
+# GitHub SSH remotes are not affected by this helper.
+# Preserve any GIT_CONFIG_COUNT entries supplied by the calling agent.
+_base="${GIT_CONFIG_COUNT:-0}"
+[[ "$_base" =~ ^[0-9]+$ && "$_base" -le 200 ]] || _base=0
+printf -v "GIT_CONFIG_KEY_${_base}" '%s' 'credential.helper'
+printf -v "GIT_CONFIG_VALUE_${_base}" '%s' ''
+printf -v "GIT_CONFIG_KEY_$((_base+1))" '%s' 'credential.https://github.com.helper'
+printf -v "GIT_CONFIG_VALUE_$((_base+1))" '%s' ''
+printf -v "GIT_CONFIG_KEY_$((_base+2))" '%s' 'credential.https://github.com.helper'
+printf -v "GIT_CONFIG_VALUE_$((_base+2))" '%s' '!gh auth git-credential'
+export "GIT_CONFIG_KEY_${_base}" "GIT_CONFIG_VALUE_${_base}"
+export "GIT_CONFIG_KEY_$((_base+1))" "GIT_CONFIG_VALUE_$((_base+1))"
+export "GIT_CONFIG_KEY_$((_base+2))" "GIT_CONFIG_VALUE_$((_base+2))"
+export GIT_CONFIG_COUNT="$((_base+3))"
+export GIT_TERMINAL_PROMPT=0
+# Credential helper called by Git must use the SAME profile selected before
+# executing the command; don't re-select in the middle of a push.
+export SGH_PINNED_PROFILE="$SGH_ACTIVE_PROFILE"
+exec "$SGH_REAL_GIT" "$@"
