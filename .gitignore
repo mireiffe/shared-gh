@@ -1,0 +1,12 @@
+# Runtime secrets and state must NEVER be committed.
+.local/
+.config/
+profiles/
+sessions/
+bindings/
+*.token
+*.key
+*.pem
+.env
+__pycache__/
+*.pyc
