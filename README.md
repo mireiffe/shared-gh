@@ -195,6 +195,32 @@ sgh bind default        # 해당 SSH 키는 항상 공용 default로 시작
 
 `sgh swap`은 **부모 Bash 셸의 환경변수를 바꾸지 않아도 동작**합니다. SSH 로그인 시 만든 고유한 세션 컨텍스트 파일에 현재 선택을 기록하고, PATH 앞에 배치한 Git/gh 래퍼가 **매 명령 실행 시** 이 파일을 읽기 때문입니다. 다른 SSH 세션의 선택 상태는 바뀌지 않습니다. Claude Code를 이 셸에서 실행하면 일반적인 `git`/`gh` 호출에 같은 래퍼가 적용됩니다.
 
+## Orca IDE / IDE-managed SSH 터미널
+
+Orca IDE는 SSH 연결 후 **Managed Server에서 원격 터미널/에이전트를 실행**합니다. 이 터미널에는 원래 SSH 인증에 사용된 `SSH_USER_AUTH`와 `SSH_CONNECTION`이 없을 수 있습니다. 이는 OpenSSH 서버의 `ExposeAuthInfo` 설정을 켜도 보장되지 않습니다.
+
+최신 `sgh`는 SSH 환경변수가 없어도 대화형 터미널에서 독립적인 세션 컨텍스트와 Git/gh 래퍼를 초기화합니다. SSH 인증키를 확인할 수 없는 경우 **경고를 매번 출력하지 않고 default를 사용**합니다. SSH로 실제 인증한 키가 확인되면 그 키의 바인딩을 우선합니다.
+
+Orca의 특정 Git worktree에서 다음처럼 명시적으로 기본 프로필을 연결할 수 있습니다.
+
+```bash
+cd /path/to/my/orca-worktree
+sgh swap alice
+sgh bind-worktree alice
+# 이제 이 worktree에서 열리는 새로운 Orca 셸은 alice를 기본으로 선택합니다.
+
+sgh status
+sgh unbind-worktree  # 설정 해제 및 현재 셸 default 복귀
+```
+
+또는 `sgh init`을 실행하고 SSH bind를 수락하면, SSH 인증키가 없는 경우에 한해 **현재 워크트리에 연결할지 추가로 확인**합니다. SSH 키를 추측하거나 접속 IP로 계정을 선택하지 않습니다.
+
+**주의:** 워크트리 바인딩은 **사용자 인증이 아닙니다.** 공유 Linux UID의 **동일한 워크트리 경로를 여는 모든 사용자**에게 같은 기본 프로필이 선택됩니다. 개인 계정의 자동 귀속이 반드시 필요하다면 서로 다른 워크트리 디렉터리를 사용하고, 보안 격리가 필요하면 OS 계정 또는 컨테이너를 분리해야 합니다. 새 터미널이 worktree 밖에서 시작하면 연결이 적용되지 않고 default로 시작합니다.
+
+Orca의 Git UI나 Managed Server가 직접 실행하는 에이전트 명령은 대화형 셸 초기화 훅을 거치지 않을 수 있습니다. 따라서 **Orca 내부의 모든 Git/gh 작업이 자동으로 이 프로필을 상속한다고 보장할 수 없습니다.** 터미널에서 `sgh status`를 확인하고 Claude Code는 해당 터미널에서 실행하거나, 에이전트 실행 환경의 PATH와 세션 설정을 별도로 구성해야 합니다.
+
+직접 SSH 접속에서도 계속 경고가 발생하면 개발 서버에서 `echo "$SSH_USER_AUTH"`와 `sshd -T ... | grep exposeauthinfo`를 확인하세요. Orca에서 값이 없는 것은 독립적인 현상이므로 `ExposeAuthInfo`만 다시 설정해도 해결되지 않을 수 있습니다.
+
 ## 명령어
 
 | 명령어 | 설명 |
@@ -205,6 +231,8 @@ sgh bind default        # 해당 SSH 키는 항상 공용 default로 시작
 | `sgh swap NAME` | 현재 SSH 세션의 프로필 전환 (`default` 포함) |
 | `sgh bind NAME` | 서버가 인증한 SSH 키와 프로필을 매핑하고 현재 세션에도 적용 |
 | `sgh unbind` | SSH 키 자동 연결 해제, 현재 세션 default 전환 |
+| `sgh bind-worktree NAME` | 현재 워크트리 경로에 기본 프로필 설정 (Orca IDE 등 SSH 인증 정보 없는 터미널용) |
+| `sgh unbind-worktree` | 현재 워크트리 기본 프로필 설정 해제 |
 | `sgh reauth NAME` | 해당 프로필을 동일 GitHub 계정으로 다시 인증 |
 | `sgh status` | 현재 선택, SSH 키 매핑, Git 작성자, 실시간 GitHub 로그인 확인 |
 | `sgh init-default [HOST]` | 공용 기본 GitHub 인증과 커밋 작성자·호스트 등록 |

@@ -353,4 +353,102 @@ fi
 grep -q 'install_hook "\$USER_HOME/.zshrc"' "$ROOT/scripts/install-dev.sh" || fail '.zshrc hook missing'
 echo 'PASS: installer includes .zshrc login hook.'
 
+# Orca IDE managed terminals are detached from SSH. They must initialize a
+# fresh context even with neither SSH_CONNECTION nor SSH_USER_AUTH available.
+run_orca() {
+  local worktree="$1" script="$2"; shift 2
+  env -u SSH_CONNECTION -u SSH_CLIENT -u SSH_TTY -u SSH_USER_AUTH \
+    -u SGH_CONTEXT -u SGH_SESSION_READY \
+    -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL \
+    PATH="$TMP/bin:$PATH" HOME="$HD" SGH_HOME="$HD/.local/share/sgh" \
+    "$@" bash --noprofile --norc -ic \
+    "cd '$worktree'; source '$APP/lib/session.sh'; source '$script'" \
+    2>"$TMP/orca.stderr"
+}
+
+cat > "$TMP/orca-unbound.sh" <<'BASH'
+[[ "${SGH_SESSION_READY:-}" == 1 ]]
+[[ -n "${SGH_CONTEXT:-}" && -d "$SGH_CONTEXT" ]]
+[[ "$(sgh_current)" == default ]]
+[[ "$(gh api user --jq .login)" == shared ]]
+sgh status | grep -q 'SSH key ID       : 확인 불가'
+BASH
+run_orca "$TMP/repos/A" "$TMP/orca-unbound.sh" > "$TMP/orca-unbound.out" || fail 'Orca first session initialization'
+! grep -q 'SSH 키 정보가 없어 default 사용' "$TMP/orca.stderr" || fail 'Orca missing SSH info should be quiet'
+echo 'PASS: detached Orca terminal initializes correctly and uses the default without SSH-key warning.'
+
+cat > "$TMP/orca-pin-alice.sh" <<'BASH'
+sgh bind-worktree alice
+[[ "$(sgh_current)" == alice ]]
+[[ "$(gh api user --jq .login)" == alice ]]
+BASH
+run_orca "$TMP/repos/A" "$TMP/orca-pin-alice.sh" > "$TMP/orca-pin-alice.out" || fail 'Orca worktree bind alice'
+
+cat > "$TMP/orca-pin-bob.sh" <<'BASH'
+sgh bind-worktree bob
+[[ "$(sgh_current)" == bob ]]
+BASH
+run_orca "$TMP/repos/B" "$TMP/orca-pin-bob.sh" > "$TMP/orca-pin-bob.out" || fail 'Orca worktree bind bob'
+
+cat > "$TMP/orca-reopen-alice.sh" <<'BASH'
+[[ "$(sgh_current)" == alice ]]
+[[ "$(gh api user --jq .login)" == alice ]]
+[[ "$(git var GIT_AUTHOR_IDENT)" == *'alice <'* ]]
+BASH
+cat > "$TMP/orca-reopen-bob.sh" <<'BASH'
+[[ "$(sgh_current)" == bob ]]
+[[ "$(gh api user --jq .login)" == bob ]]
+BASH
+run_orca "$TMP/repos/A" "$TMP/orca-reopen-alice.sh" > "$TMP/orca-reopen-alice.out" &
+pa=$!
+run_orca "$TMP/repos/B" "$TMP/orca-reopen-bob.sh" > "$TMP/orca-reopen-bob.out" &
+pb=$!
+wait "$pa" || fail 'Orca reopen Alice'
+wait "$pb" || fail 'Orca reopen Bob'
+echo 'PASS: separate Orca worktrees restore different profile preferences in simultaneous terminals.'
+# A managed IDE server could inherit SGH_CONTEXT from the first SSH shell.
+# That environment must never cause independent newly-spawned terminals to
+# share the original shell's session-selection file.
+mkdir -p "$TMP/stale-orca-context"
+printf 'bob\n' > "$TMP/stale-orca-context/active"
+cat > "$TMP/orca-inherited.sh" <<'BASH'
+[[ "$(sgh_current)" == alice ]]
+[[ "$SGH_CONTEXT" != "$TEST_TMP/stale-orca-context" ]]
+[[ "$SGH_SESSION_SHELL_PID" == "$BASHPID" ]]
+BASH
+run_orca "$TMP/repos/A" "$TMP/orca-inherited.sh" \
+  SGH_CONTEXT="$TMP/stale-orca-context" SGH_SESSION_READY=1 \
+  SGH_SESSION_SHELL_PID=999999 > "$TMP/orca-inherited.out" || fail 'Orca stale inherited session isolation'
+echo 'PASS: an Orca managed server cannot make new terminals reuse a stale inherited session context.'
+
+
+# A real, verified SSH identity is authoritative; another user's worktree
+# preference must not override a normal SSH session with an unbound key.
+cat > "$TMP/orca-ssh-precedence.sh" <<'BASH'
+[[ "$(sgh_current)" == alice ]]
+BASH
+run_actor alice "$TMP/orca-ssh-precedence.sh" > "$TMP/orca-ssh-precedence.out" || fail 'SSH identity precedence over Orca workspace'
+echo 'PASS: authenticated SSH-key binding overrides the worktree preference.'
+
+cat > "$TMP/orca-unbind.sh" <<'BASH'
+sgh unbind-worktree
+[[ "$(sgh_current)" == default ]]
+BASH
+run_orca "$TMP/repos/B" "$TMP/orca-unbind.sh" > "$TMP/orca-unbind.out" || fail 'Orca worktree unbind'
+run_orca "$TMP/repos/B" "$TMP/orca-unbound.sh" > "$TMP/orca-unbound-again.out" || fail 'Orca unbound subsequent terminal'
+echo 'PASS: unbind-worktree restores normal default selection in future detached terminals.'
+
+# Interactive init without SSH identity offers an explicit SECOND confirmation
+# before establishing a worktree-wide preference.
+"$REAL_GIT" init -q "$TMP/repos/orca-wizard"
+cat > "$TMP/orca-wizard.sh" <<'BASH'
+printf 'orca-dev\n\n\n\n\nY\ny\n' | sgh init
+[[ "$(sgh_current)" == orca-dev ]]
+key="$(sgh_worktree_key)"
+[[ "$(cat "$SGH_WORKTREE_BINDINGS/$key")" == orca-dev ]]
+BASH
+run_orca "$TMP/repos/orca-wizard" "$TMP/orca-wizard.sh" MOCK_LOGIN=orca-dev > "$TMP/orca-wizard.out" || { cat "$TMP/orca.stderr" "$TMP/orca-wizard.out"; fail 'Orca wizard worktree binding'; }
+grep -q '모든 사용자에게 적용' "$TMP/orca-wizard.out" || fail 'worktree sharing not disclosed in wizard'
+echo 'PASS: Orca init requests explicit workspace-wide consent before persistent auto-selection.'
+
 echo 'ALL OFFLINE SGH TESTS PASSED.' 

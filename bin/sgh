@@ -16,11 +16,14 @@ sgh — GitHub identity switcher (shared Linux account)
   sgh swap NAME            이 SSH 세션만 NAME 프로필로 전환
   sgh swap default         공용 기본 계정으로 즉시 복귀
   sgh bind NAME            현재 SSH 인증키를 NAME에 연결 (다음 로그인부터 자동)
+  sgh bind-worktree NAME   현재 Git worktree의 기본 프로필 설정 (Orca IDE)
+  sgh unbind-worktree      현재 worktree의 기본 프로필 연결 해제
   sgh unbind               현재 SSH 인증키 연결 해제
   sgh status               현재 세션/SSH 바인딩/실제 GitHub 계정 확인
   sgh reauth [NAME]        등록 계정 인증 갱신
   sgh init-default [HOST]  관리자: 기존 공용 gh 인증을 default로 등록
 
+SSH 인증키 정보가 없는 Orca IDE에서는 worktree별 기본 프로필을 설정할 수 있습니다.
 기본 계정에서도 git commit, push, merge, gh pr merge를 사용할 수 있습니다.
 개인 계정 인증 실패 시 자동으로 default로 전환되고 원래 명령을 계속합니다.
 단, 원래 명령이 실행된 뒤 실패한 경우에는 임의로 다시 실행하지 않습니다.
@@ -209,13 +212,33 @@ cmd_init() {
     fi
     case "$answer" in
       ''|Y|y|YES|yes|Yes)
-        if cmd_bind "$alias"; then
-          echo '[sgh] 초기 설정 완료. 다음 SSH 로그인부터 연결된 계정이 자동 선택됩니다.'
-          return 0
-        else
-          echo "[sgh] 계정 등록은 완료됐지만 SSH 연결에 실패했습니다. SSH_USER_AUTH/ExposeAuthInfo를 확인한 뒤 sgh bind $alias 를 실행하세요." >&2
+        if sgh_ssh_key_id >/dev/null 2>&1; then
+          if cmd_bind "$alias"; then
+            echo '[sgh] 초기 설정 완료. 다음 SSH 로그인부터 연결된 계정이 자동 선택됩니다.'
+            return 0
+          fi
+          echo '[sgh] 계정 등록은 완료됐지만 SSH 키 연결에 실패했습니다.' >&2
           return 1
         fi
+        # Worktree binding is intentionally a second, explicit opt-in: it
+        # applies to EVERY user opening that same directory, not one SSH key.
+        local worktree_root worktree_consent
+        if worktree_root="$(sgh_worktree_root)"; then
+          printf '[sgh] 현재 터미널에 SSH 인증키 정보가 없습니다 (Orca IDE 등).\n'
+          printf '[sgh] 모든 사용자에게 적용되는 이 워크트리(%s)의 기본 프로필을 %s(으)로 설정할까요? [y/N]: ' "$worktree_root" "$alias"
+          if IFS= read -r worktree_consent; then
+            case "$worktree_consent" in
+              Y|y|YES|yes|Yes)
+                cmd_bind_worktree "$alias"
+                echo '[sgh] 워크트리 설정 완료. 다음 Orca 터미널에서 자동 선택됩니다.'
+                return 0;;
+            esac
+          fi
+          echo '[sgh] 워크트리 연결을 생략했습니다. 현재 세션의 개인 프로필은 유지됩니다.'
+          return 0
+        fi
+        echo "[sgh] SSH 키 정보도 Git 워크트리도 없어 자동 연결은 생략했습니다. 현재 세션은 $alias 프로필입니다." >&2
+        return 0
         ;;
       N|n|NO|no|No)
         echo "[sgh] SSH 자동 연결을 건너뛰었습니다. 현재 세션은 $alias 계정을 사용합니다."
@@ -280,6 +303,48 @@ cmd_bind() {
   printf '[sgh] SSH 키 %s → %s 연결 완료. 다음 로그인부터 자동 선택합니다.\n' "$id" "$alias"
 }
 
+# IDE-managed terminals are created by a long-lived server process and may
+# have no SSH_USER_AUTH. The user can opt into a persistent worktree binding.
+# WARNING: All users sharing this worktree path will get the same default
+# profile. This is convenience, not secure identification of a person.
+cmd_bind_worktree() {
+  require_context
+  local alias="${1:-}" id root tmp
+  sgh_alias_ok "$alias" || {
+    echo '[sgh] 사용법: sgh bind-worktree <프로필명|default>' >&2
+    return 2
+  }
+  root="$(sgh_worktree_root)" && id="$(sgh_worktree_key)" || {
+    echo '[sgh] Git 저장소/워크트리 디렉터리에서 실행하세요.' >&2
+    return 1
+  }
+  if [[ "$alias" != default ]] && ! sgh_verify_profile "$alias"; then
+    fail_to_default
+    echo '[sgh] 인증된 프로필만 워크트리에 연결할 수 있습니다.' >&2
+    return 1
+  fi
+  mkdir -p "$SGH_WORKTREE_BINDINGS"
+  tmp="$(mktemp "$SGH_WORKTREE_BINDINGS/.binding.XXXXXX")" || return 1
+  chmod 600 "$tmp"
+  printf '%s\n' "$alias" > "$tmp"
+  mv -f -- "$tmp" "$SGH_WORKTREE_BINDINGS/$id"
+  sgh_context_set "$alias"
+  printf '[sgh] 워크트리 기본 프로필: %s → %s\n' "$root" "$alias"
+  echo '[sgh] 주의: 동일한 경로의 워크트리를 여는 다른 사용자에게도 이 기본 프로필이 적용됩니다.'
+}
+
+cmd_unbind_worktree() {
+  require_context
+  local id
+  id="$(sgh_worktree_key)" || {
+    echo '[sgh] Git 저장소/워크트리 디렉터리에서 실행하세요.' >&2
+    return 1
+  }
+  rm -f -- "$SGH_WORKTREE_BINDINGS/$id"
+  sgh_context_set default
+  echo '[sgh] 워크트리 기본 프로필 연결 해제. 현재 세션은 default로 전환합니다.'
+}
+
 cmd_unbind() {
   require_context
   local id
@@ -310,6 +375,13 @@ cmd_reauth() {
 }
 
 cmd_status() {
+  local wt_id wt_profile="(없음)" wt_root=""
+  if wt_id="$(sgh_worktree_key)"; then
+    wt_root="$(sgh_worktree_root)"
+    if [[ -r "$SGH_WORKTREE_BINDINGS/$wt_id" ]]; then
+      IFS= read -r wt_profile < "$SGH_WORKTREE_BINDINGS/$wt_id" || wt_profile='(없음)'
+    fi
+  fi
   local current live id bind="(없음)"
   current="$(sgh_current)"
   printf '현재 세션 프로필 : %s\n' "$current"
@@ -317,9 +389,12 @@ cmd_status() {
     if [[ -r "$SGH_BINDINGS/$id" ]]; then IFS= read -r bind < "$SGH_BINDINGS/$id" || true; fi
     printf 'SSH key ID       : %s\n' "$id"
   else
-    echo 'SSH key ID       : 확인 불가 (기본 계정은 사용 가능)'
+    echo 'SSH key ID       : 확인 불가 (Orca 등 분리된 터미널일 수 있음)'
   fi
   printf 'SSH 자동 연결    : %s\n' "$bind"
+  if [[ -n "$wt_root" ]]; then
+    printf '워크트리 기본값 : %s (%s)\n' "$wt_profile" "$wt_root"
+  fi
   printf 'GitHub 설정     : %s\n' "$(sgh_gh_dir "$current")"
   printf 'GitHub 호스트   : %s\n' "$(sgh_profile_host "$current")"
   if sgh_profile_read "$current"; then
@@ -341,19 +416,27 @@ cmd_status() {
 
 cmd_auto() {
   require_context
-  local id alias
-  if ! id="$(sgh_ssh_key_id)"; then
-    echo '[sgh] SSH 키 정보가 없어 default 사용 (SSH_USER_AUTH / ExposeAuthInfo 확인)' >&2
-    return 0
+  local id alias wt_id origin
+  if id="$(sgh_ssh_key_id)"; then
+    # Valid SSH identity takes precedence over workspace preferences. Even an
+    # unbound SSH key will NOT inherit someone else's workspace preference.
+    [[ -r "$SGH_BINDINGS/$id" ]] || return 0
+    IFS= read -r alias < "$SGH_BINDINGS/$id" || alias=default
+    origin='SSH 키'
+  else
+    # Orca/IDE server terminals have no per-SSH authentication context.
+    # Only a previous explicit bind-worktree can select a personal profile.
+    wt_id="$(sgh_worktree_key)" || return 0
+    [[ -r "$SGH_WORKTREE_BINDINGS/$wt_id" ]] || return 0
+    IFS= read -r alias < "$SGH_WORKTREE_BINDINGS/$wt_id" || alias=default
+    origin='워크트리'
   fi
-  [[ -r "$SGH_BINDINGS/$id" ]] || return 0
-  IFS= read -r alias < "$SGH_BINDINGS/$id" || alias=default
-  if [[ "$alias" == default ]]; then return 0; fi
+  [[ "$alias" == default ]] && return 0
   if sgh_alias_ok "$alias" && sgh_verify_profile "$alias"; then
     sgh_context_set "$alias"
-    printf '[sgh] SSH 키 기반 자동 선택: %s (%s)\n' "$alias" "$SGH_LOGIN"
+    printf '[sgh] %s 기반 자동 선택: %s (%s)\n' "$origin" "$alias" "$SGH_LOGIN"
   else
-    echo "[sgh] SSH 키 연결 프로필($alias) 인증 실패. default로 접속합니다." >&2
+    echo "[sgh] ${origin} 연결 프로필($alias) 인증 실패. default로 접속합니다." >&2
   fi
 }
 
@@ -363,6 +446,8 @@ case "${1:-status}" in
   add) cmd_add "${2:-}" "${3:-}";;
   swap) cmd_swap "${2:-}";;
   bind) cmd_bind "${2:-}";;
+  bind-worktree) cmd_bind_worktree "${2:-}";;
+  unbind-worktree) cmd_unbind_worktree;;
   unbind) cmd_unbind;;
   list|ls) cmd_list;;
   status) cmd_status;;

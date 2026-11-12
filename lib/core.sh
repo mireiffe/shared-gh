@@ -12,6 +12,7 @@ SGH_REAL_GH="$SGH_ROOT/real/gh"
 SGH_HOME="${SGH_HOME:-$HOME/.local/share/sgh}"
 SGH_PROFILES="$SGH_HOME/profiles"
 SGH_BINDINGS="$SGH_HOME/bindings"
+SGH_WORKTREE_BINDINGS="$SGH_HOME/worktree-bindings"
 
 sgh_alias_ok() {
   [[ "${1:-}" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}$ ]]
@@ -172,6 +173,23 @@ sgh_ssh_key_id() {
   [[ "$fingerprint" =~ ^SHA256:[A-Za-z0-9+/=]+$ ]] || return 1
   printf '%s' "$fingerprint" | sha256sum | cut -c1-24
   printf '\n'
+}
+
+# Worktree identity is deliberately NOT a user identity. It is an explicit
+# workspace preference for terminals launched by a detached IDE server that
+# no longer exposes the SSH key used for the original connection.
+sgh_worktree_root() {
+  local root
+  root="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \
+    "$SGH_REAL_GIT" rev-parse --show-toplevel 2>/dev/null)" || return 1
+  [[ -d "$root" ]] || return 1
+  (cd -- "$root" && pwd -P)
+}
+
+sgh_worktree_key() {
+  local root
+  root="$(sgh_worktree_root)" || return 1
+  printf '%s' "$root" | sha256sum | cut -c1-24
 }
 
 sgh_write_profile() {
