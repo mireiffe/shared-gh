@@ -6,16 +6,17 @@ if sgh_git_is_read_only "$@"; then
 else
   sgh_resolve
 fi
-# Override pre-existing credential helpers for github.com HTTPS remotes.
-# GitHub SSH remotes are not affected by this helper.
+# Override pre-existing credential helpers for the selected profile's HTTPS
+# GitHub/GHE host. SSH remotes are not affected by this helper.
 # Preserve any GIT_CONFIG_COUNT entries supplied by the calling agent.
+_credential_host="$(sgh_profile_host "$SGH_ACTIVE_PROFILE")"
 _base="${GIT_CONFIG_COUNT:-0}"
 [[ "$_base" =~ ^[0-9]+$ && "$_base" -le 200 ]] || _base=0
 printf -v "GIT_CONFIG_KEY_${_base}" '%s' 'credential.helper'
 printf -v "GIT_CONFIG_VALUE_${_base}" '%s' ''
-printf -v "GIT_CONFIG_KEY_$((_base+1))" '%s' 'credential.https://github.com.helper'
+printf -v "GIT_CONFIG_KEY_$((_base+1))" '%s' "credential.https://${_credential_host}.helper"
 printf -v "GIT_CONFIG_VALUE_$((_base+1))" '%s' ''
-printf -v "GIT_CONFIG_KEY_$((_base+2))" '%s' 'credential.https://github.com.helper'
+printf -v "GIT_CONFIG_KEY_$((_base+2))" '%s' "credential.https://${_credential_host}.helper"
 printf -v "GIT_CONFIG_VALUE_$((_base+2))" '%s' '!gh auth git-credential'
 export "GIT_CONFIG_KEY_${_base}" "GIT_CONFIG_VALUE_${_base}"
 export "GIT_CONFIG_KEY_$((_base+1))" "GIT_CONFIG_VALUE_$((_base+1))"

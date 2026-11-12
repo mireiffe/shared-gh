@@ -6,7 +6,10 @@ USER_NAME="${1:-shared}"
 USER_HOME="$(getent passwd "$USER_NAME" | cut -d: -f6)"
 USER_SHELL="$(getent passwd "$USER_NAME" | cut -d: -f7)"
 [[ -n "$USER_HOME" && -d "$USER_HOME" ]] || { echo "사용자/홈 디렉터리 없음: $USER_NAME" >&2; exit 1; }
-[[ "$USER_SHELL" == *bash ]] || { echo "Bash 로그인 계정만 지원합니다: $USER_SHELL" >&2; exit 1; }
+case "${USER_SHELL##*/}" in
+  bash|zsh) ;;
+  *) echo "지원되지 않는 로그인 셸 (bash/zsh 필요): $USER_SHELL" >&2; exit 1;;
+esac
 for tool in git gh ssh-keygen flock sha256sum timeout mktemp; do
   command -v "$tool" >/dev/null || { echo "필요한 명령 없음: $tool" >&2; exit 1; }
 done
@@ -53,12 +56,21 @@ install_hook() {
     printf '\n%s\n' "$HOOK" >> "$file"
   fi
 }
-install_hook "$USER_HOME/.bashrc"
-if [[ -e "$USER_HOME/.bash_profile" ]]; then
-  install_hook "$USER_HOME/.bash_profile"
-else
-  install_hook "$USER_HOME/.profile"
-fi
+case "${USER_SHELL##*/}" in
+  bash)
+    install_hook "$USER_HOME/.bashrc"
+    if [[ -e "$USER_HOME/.bash_profile" ]]; then
+      install_hook "$USER_HOME/.bash_profile"
+    else
+      install_hook "$USER_HOME/.profile"
+    fi
+    SESSION_HOOKS="$USER_HOME/.bashrc / 로그인 프로필"
+    ;;
+  zsh)
+    install_hook "$USER_HOME/.zshrc"
+    SESSION_HOOKS="$USER_HOME/.zshrc"
+    ;;
+esac
 
 # Place this option before Include and Match blocks (sshd first-match semantics).
 SSHD_CONFIG=/etc/ssh/sshd_config
@@ -90,7 +102,7 @@ cat <<END
 [sgh 설치 완료]
   공용 사용자: $USER_NAME
   실행 명령:  /usr/local/bin/sgh
-  세션 훅:   $USER_HOME/.bashrc / 로그인 프로필
+  세션 훅:   $SESSION_HOOKS
   Git 래퍼:  /opt/sgh/guard-bin/git, gh
   인증 정보:  $USER_HOME/.local/share/sgh (Git 저장소 밖)
 

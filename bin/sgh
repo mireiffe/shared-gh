@@ -10,14 +10,14 @@ usage() {
 sgh — GitHub identity switcher (shared Linux account)
 
   sgh list                 저장된 계정 목록
-  sgh add NAME             개인 계정 등록 (GitHub OAuth + 커밋 작성자)
+  sgh add NAME [HOST]      개인 계정 등록 (HOST: github.com 또는 사내 GHE)
   sgh swap NAME            이 SSH 세션만 NAME 프로필로 전환
   sgh swap default         공용 기본 계정으로 즉시 복귀
   sgh bind NAME            현재 SSH 인증키를 NAME에 연결 (다음 로그인부터 자동)
   sgh unbind               현재 SSH 인증키 연결 해제
   sgh status               현재 세션/SSH 바인딩/실제 GitHub 계정 확인
   sgh reauth [NAME]        등록 계정 인증 갱신
-  sgh init-default         관리자: 기존 공용 gh 인증을 default로 등록
+  sgh init-default [HOST]  관리자: 기존 공용 gh 인증을 default로 등록
 
 기본 계정에서도 git commit, push, merge, gh pr merge를 사용할 수 있습니다.
 개인 계정 인증 실패 시 자동으로 default로 전환되고 원래 명령을 계속합니다.
@@ -49,13 +49,23 @@ fail_to_default() {
 }
 
 get_new_identity() {
-  local alias="$1" login="$2" id="" default_name="" default_email="" name="" email=""
-  id="$(sgh_gh_command "$alias" api user --jq .id 2>/dev/null || true)"
+  local alias="$1" login="$2" id="" host="" default_name="" default_email="" name="" email=""
+  host="$(sgh_profile_host "$alias")" || return 1
   default_name="$(sgh_gh_command "$alias" api user --jq '.name // .login' 2>/dev/null || true)"
   default_name="${default_name:-$login}"
-  if [[ "$id" =~ ^[0-9]+$ ]]; then default_email="${id}+${login}@users.noreply.github.com"; fi
-  printf '\n[sgh] GitHub 로그인: %s\n' "$login"
-  printf '[sgh] 커밋 이메일은 본인 GitHub에 연결된 주소를 입력하세요.\n'
+  # For GHE, use the enterprise account email when exposed by the API;
+  # otherwise require the actual corporate email from the user.
+  default_email="$(sgh_gh_command "$alias" api user --jq '.email // empty' 2>/dev/null || true)"
+  if [[ -z "$default_email" && "$host" == github.com ]]; then
+    id="$(sgh_gh_command "$alias" api user --jq .id 2>/dev/null || true)"
+    if [[ "$id" =~ ^[0-9]+$ ]]; then default_email="${id}+${login}@users.noreply.github.com"; fi
+  fi
+  printf '\n[sgh] GitHub 로그인: %s (%s)\n' "$login" "$host"
+  if [[ "$host" != github.com ]]; then
+    printf '[sgh] GHE 커밋 이메일: 사내 실제 이메일 또는 GHE에 등록된 이메일을 입력하세요.\n'
+  else
+    printf '[sgh] 커밋 이메일은 본인 GitHub에 연결된 주소를 입력하세요.\n'
+  fi
   read -r -p "Git 작성자 이름 [$default_name]: " name || true
   read -r -p "Git 작성자 이메일 [$default_email]: " email || true
   name="${name:-$default_name}"
@@ -70,11 +80,15 @@ get_new_identity() {
 cmd_init_default() {
   mkdir -p "$SGH_PROFILES/default" "$(sgh_gh_dir default)"
   acquire_lock default
-  local login name email
+  local login name email host
+  host="$(sgh_host_normalize "${1:-${SGH_GITHUB_HOST:-$(sgh_profile_host default)}}")" || {
+    echo '[sgh] 잘못된 GitHub 호스트입니다.' >&2; exit 2;
+  }
+  SGH_HOST_OVERRIDE_PROFILE=default SGH_HOST_OVERRIDE="$host"
   login="$(sgh_live_login default || true)"
   if [[ -z "$login" ]]; then
     printf '[sgh] 기존 공용 GitHub CLI 인증을 찾지 못했습니다. 로그인합니다.\n'
-    if ! sgh_gh_command default auth login --hostname github.com --git-protocol https --insecure-storage; then
+    if ! sgh_gh_command default auth login --hostname "$host" --git-protocol https --insecure-storage; then
       echo '[sgh] default GitHub 인증 실패. 기존 설정을 보존했습니다.' >&2
       exit 1
     fi
@@ -89,8 +103,8 @@ cmd_init_default() {
     "$SGH_REAL_GIT" config --file "$(sgh_git_config default)" user.name "$name"
     "$SGH_REAL_GIT" config --file "$(sgh_git_config default)" user.email "$email"
   fi
-  sgh_write_profile default "$login" "$name" "$email"
-  printf '[sgh] default 준비 완료: GitHub %s / %s <%s>\n' "$login" "$name" "$email"
+  sgh_write_profile default "$login" "$name" "$email" "$host"
+  printf '[sgh] default 준비 완료: GitHub %s (%s) / %s <%s>\n' "$login" "$host" "$name" "$email"
 }
 
 cmd_add() {
@@ -98,7 +112,12 @@ cmd_add() {
   # Any unexpected error, interruption or failed OAuth must leave this session
   # on the known default; the final registered profile is written last.
   trap 'fail_to_default' EXIT
-  local alias="${1:-}" login
+  local alias="${1:-}" login host
+  host="$(sgh_host_normalize "${2:-${SGH_GITHUB_HOST:-$(sgh_profile_host default)}}")" || {
+    echo '[sgh] 잘못된 GitHub 호스트입니다. 호스트명 또는 https://HOST/ 형식만 허용합니다.' >&2
+    exit 2
+  }
+  SGH_HOST_OVERRIDE_PROFILE="$alias" SGH_HOST_OVERRIDE="$host"
   sgh_alias_ok "$alias" && [[ "$alias" != default ]] || {
     echo '[sgh] 올바른 개인 프로필 이름을 입력하세요. (default는 sgh init-default)' >&2
     exit 2
@@ -114,7 +133,7 @@ cmd_add() {
   mkdir -p "$(sgh_gh_dir "$alias")"
   echo '[sgh] 이 개발 서버의 모든 세션은 같은 Linux UID를 사용하므로 개인 토큰 격리는 제공하지 않습니다.'
   echo "[sgh] $alias 프로필용 GitHub 인증을 시작합니다."
-  if ! sgh_gh_command "$alias" auth login --hostname github.com --git-protocol https --insecure-storage; then
+  if ! sgh_gh_command "$alias" auth login --hostname "$host" --git-protocol https --insecure-storage; then
     exit 1
   fi
   login="$(sgh_live_login "$alias" || true)"
@@ -125,10 +144,11 @@ cmd_add() {
   "$SGH_REAL_GIT" config --file "$(sgh_git_config "$alias")" user.name "$SGH_NEW_NAME"
   "$SGH_REAL_GIT" config --file "$(sgh_git_config "$alias")" user.email "$SGH_NEW_EMAIL"
   "$SGH_REAL_GIT" config --file "$(sgh_git_config "$alias")" user.useConfigOnly true
-  sgh_write_profile "$alias" "$login" "$SGH_NEW_NAME" "$SGH_NEW_EMAIL"
+  sgh_write_profile "$alias" "$login" "$SGH_NEW_NAME" "$SGH_NEW_EMAIL" "$host"
   sgh_context_set "$alias"
   trap - EXIT
-  printf '[sgh] 등록 완료: %s → GitHub %s\n' "$alias" "$login"
+  unset SGH_HOST_OVERRIDE_PROFILE SGH_HOST_OVERRIDE
+  printf '[sgh] 등록 완료: %s → GitHub %s (%s)\n' "$alias" "$login" "$host"
   printf '[sgh] 다음 SSH 접속부터 자동 사용하려면: sgh bind %s\n' "$alias"
 }
 
@@ -202,7 +222,7 @@ cmd_reauth() {
   sgh_profile_read "$alias" || { echo '[sgh] 미등록 프로필입니다. sgh add를 사용하세요.' >&2; exit 1; }
   acquire_lock "add-$alias"
   echo "[sgh] $alias 재인증을 시작합니다. 기존 계정: $SGH_LOGIN"
-  if ! sgh_gh_command "$alias" auth login --hostname github.com --git-protocol https --insecure-storage; then
+  if ! sgh_gh_command "$alias" auth login --hostname "$(sgh_profile_host "$alias")" --git-protocol https --insecure-storage; then
     exit 1
   fi
   if ! sgh_verify_profile "$alias"; then
@@ -226,6 +246,7 @@ cmd_status() {
   fi
   printf 'SSH 자동 연결    : %s\n' "$bind"
   printf 'GitHub 설정     : %s\n' "$(sgh_gh_dir "$current")"
+  printf 'GitHub 호스트   : %s\n' "$(sgh_profile_host "$current")"
   if sgh_profile_read "$current"; then
     printf '기록된 GitHub   : %s\n' "$SGH_LOGIN"
     printf '커밋 작성자     : %s <%s>\n' "$SGH_AUTHOR" "$SGH_EMAIL"
@@ -262,8 +283,8 @@ cmd_auto() {
 }
 
 case "${1:-status}" in
-  init-default) cmd_init_default;;
-  add) cmd_add "${2:-}";;
+  init-default) cmd_init_default "${2:-}";;
+  add) cmd_add "${2:-}" "${3:-}";;
   swap) cmd_swap "${2:-}";;
   bind) cmd_bind "${2:-}";;
   unbind) cmd_unbind;;

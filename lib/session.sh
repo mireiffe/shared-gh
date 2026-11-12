@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
-# Sourced only by the interactive SSH Bash shell of the shared development user.
+# Sourced by an interactive SSH bash or zsh shell of the shared development user.
 [[ "${SGH_SESSION_READY:-}" == 1 ]] && return 0
 case "$-" in *i*) ;; *) return 0;; esac
 [[ -n "${SSH_CONNECTION:-}" ]] || return 0
 
-_sgh_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -n "${ZSH_VERSION:-}" ]]; then
+  _sgh_source_file="${(%):-%x}"
+else
+  _sgh_source_file="${BASH_SOURCE[0]}"
+fi
+_sgh_root="$(cd "$(dirname "$_sgh_source_file")/.." && pwd)"
+unset _sgh_source_file
 source "$_sgh_root/lib/core.sh"
 umask 077
 mkdir -p "$SGH_HOME/sessions" "$SGH_PROFILES" "$SGH_BINDINGS"

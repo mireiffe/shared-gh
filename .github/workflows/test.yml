@@ -8,8 +8,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install test dependencies
-        run: sudo apt-get update && sudo apt-get install -y git openssh-client
+        run: sudo apt-get update && sudo apt-get install -y git openssh-client zsh
       - name: Bash syntax checks
         run: bash -n bin/sgh lib/*.sh guard-bin/* scripts/*.sh tests/*.sh
-      - name: Identity and fallback integration tests
+      - name: Bash/zsh session and identity integration tests
         run: bash tests/test_sgh.sh
