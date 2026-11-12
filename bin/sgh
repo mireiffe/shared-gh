@@ -10,6 +10,8 @@ usage() {
 sgh — GitHub identity switcher (shared Linux account)
 
   sgh list                 저장된 계정 목록
+  sgh init                 대화형 계정 등록 → 인증 → SSH 키 연결 (기본 Y)
+  sgh init [NAME [HOST]]   이름/호스트를 미리 지정하고 인증 및 bind 여부 확인
   sgh add NAME [HOST]      개인 계정 등록 (HOST: github.com 또는 사내 GHE)
   sgh swap NAME            이 SSH 세션만 NAME 프로필로 전환
   sgh swap default         공용 기본 계정으로 즉시 복귀
@@ -149,7 +151,80 @@ cmd_add() {
   trap - EXIT
   unset SGH_HOST_OVERRIDE_PROFILE SGH_HOST_OVERRIDE
   printf '[sgh] 등록 완료: %s → GitHub %s (%s)\n' "$alias" "$login" "$host"
-  printf '[sgh] 다음 SSH 접속부터 자동 사용하려면: sgh bind %s\n' "$alias"
+  if [[ "${SGH_WIZARD:-0}" != 1 ]]; then
+    printf '[sgh] 다음 SSH 접속부터 자동 사용하려면: sgh bind %s\n' "$alias"
+  fi
+}
+
+
+# Guided setup intentionally reuses the existing add + bind paths, including
+# their profile lock, OAuth failure fallback, validation and SSH key binding.
+cmd_init() {
+  require_context
+  if [[ $# -gt 2 ]]; then
+    echo '[sgh] 사용법: sgh init [계정명 [GitHub 호스트]]' >&2
+    return 2
+  fi
+
+  local alias="${1:-}" host_input="${2:-}" host_hint host answer
+  local SGH_WIZARD=1
+  if [[ -z "$alias" ]]; then
+    printf '[sgh] 추가할 계정 이름: '
+    if ! IFS= read -r alias; then
+      fail_to_default
+      return 1
+    fi
+  fi
+  if ! sgh_alias_ok "$alias" || [[ "$alias" == default ]]; then
+    echo '[sgh] 계정 이름은 영문/숫자로 시작하고 영문/숫자/_/-만 사용할 수 있습니다. default는 예약된 이름입니다.' >&2
+    fail_to_default
+    return 2
+  fi
+
+  host_hint="$(sgh_profile_host default)" || host_hint=github.com
+  if [[ -z "$host_input" ]]; then
+    printf '[sgh] GitHub Enterprise URL 또는 호스트 [%s]: ' "$host_hint"
+    if ! IFS= read -r host_input; then
+      fail_to_default
+      return 1
+    fi
+  fi
+  host="$(sgh_host_normalize "${host_input:-$host_hint}")" || {
+    echo '[sgh] 올바르지 않은 호스트입니다. github.com 또는 https://ghe.company.com 형식으로 입력하세요.' >&2
+    fail_to_default
+    return 2
+  }
+
+  printf '\n[sgh] %s (%s) 계정의 GitHub 인증을 시작합니다.\n' "$alias" "$host"
+  cmd_add "$alias" "$host"
+
+  # When invoked interactively, empty input means YES, while EOF does not
+  # silently authorize a bind (useful when a caller pipes incomplete input).
+  while true; do
+    printf '[sgh] 현재 SSH 인증키를 %s 계정에 자동 연결할까요? [Y/n]: ' "$alias"
+    if ! IFS= read -r answer; then
+      echo
+      echo "[sgh] 응답이 없어 SSH 연결을 생략합니다. 나중에 sgh bind $alias 를 실행할 수 있습니다."
+      return 0
+    fi
+    case "$answer" in
+      ''|Y|y|YES|yes|Yes)
+        if cmd_bind "$alias"; then
+          echo '[sgh] 초기 설정 완료. 다음 SSH 로그인부터 연결된 계정이 자동 선택됩니다.'
+          return 0
+        else
+          echo "[sgh] 계정 등록은 완료됐지만 SSH 연결에 실패했습니다. SSH_USER_AUTH/ExposeAuthInfo를 확인한 뒤 sgh bind $alias 를 실행하세요." >&2
+          return 1
+        fi
+        ;;
+      N|n|NO|no|No)
+        echo "[sgh] SSH 자동 연결을 건너뛰었습니다. 현재 세션은 $alias 계정을 사용합니다."
+        echo "[sgh] 다음 로그인부터 자동 사용하려면: sgh bind $alias"
+        return 0
+        ;;
+      *) echo '[sgh] Y 또는 n을 입력하세요.' >&2;;
+    esac
+  done
 }
 
 cmd_swap() {
@@ -283,6 +358,7 @@ cmd_auto() {
 }
 
 case "${1:-status}" in
+  init) cmd_init "${@:2}";;
   init-default) cmd_init_default "${2:-}";;
   add) cmd_add "${2:-}" "${3:-}";;
   swap) cmd_swap "${2:-}";;

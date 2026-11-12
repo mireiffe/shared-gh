@@ -5,7 +5,7 @@
 - **접속 서버(Bastion):** 사람마다 다른 Linux 계정과 SSH 키를 사용
 - **개발 서버:** 동일한 Linux 계정(예: `shared`), Git 저장소·Claude Code 등 개발 환경 공유
 - **`default`:** 기존 공용 GitHub 계정. **commit / push / merge / `gh pr merge` 모두 정상 사용 가능**
-- **개인 계정:** `sgh add <이름>`으로 미리 등록하고 `sgh swap <이름>`으로 전환
+- **개인 계정:** `sgh init`으로 대화형 등록·GitHub 인증·SSH 바인딩까지 한 번에 처리하고 `sgh swap <이름>`으로 전환
 - **자동 선택:** `sgh bind <이름>`으로 개발 서버 접속에 사용된 SSH 공개키와 프로필을 연결
 - **자동 복귀:** 개인 인증이 실패하면 **현재 세션을 `default`로 바꾸고 원래 명령을 실행**. 공용 계정의 별도 GitHub 권한 정책이 적용됨
 
@@ -134,21 +134,47 @@ cat ~/.ssh/id_ed25519_sgh_dev.pub
 
 관리자는 **각 사용자 공개키만** 공용 개발 계정의 `~/.ssh/authorized_keys`에 등록합니다. 비공개키를 서버·저장소·관리자에게 보내면 안 됩니다.
 
-## 3. 사용자: GitHub 프로필 등록 및 SSH 자동 연결
+## 3. 사용자: `sgh init`으로 한 번에 설정 (권장)
+
+관리자가 개발 서버에 설치하고 사용자별 **접속 서버 → 개발 서버** SSH 공개키를 등록했다면, 개발 서버에 접속해 다음 명령만 실행합니다.
 
 ```bash
 ssh dev-shared
+sgh init
+```
 
-# 1회: OAuth Device Flow + Git 작성자 이름/이메일
-sgh add alice                     # github.com (공용 default의 호스트가 github.com일 때)
-# sgh add alice github.corp.example  # GitHub Enterprise Server
-# sgh add alice https://github.corp.example/  # URL 입력도 허용, 호스트로 정규화
+대화형 설정 예시 (입력 예시는 `alice`, `https://github.corp.example`):
 
-# 그 SSH 키로 접속할 때 alice가 자동 선택되도록 연결
+```text
+[sgh] 추가할 계정 이름: alice
+[sgh] GitHub Enterprise URL 또는 호스트 [github.com]: https://github.corp.example
+
+[sgh] alice (github.corp.example) 계정의 GitHub 인증을 시작합니다.
+# GitHub CLI 로그인/브라우저 인증 진행
+# Git 작성자 이름/이메일 입력 (GHE에서 이메일 미공개 시 직접 입력)
+
+[sgh] 현재 SSH 인증키를 alice 계정에 자동 연결할까요? [Y/n]: Y
+[sgh] SSH 키 ... → alice 연결 완료. 다음 로그인부터 자동 선택합니다.
+[sgh] 초기 설정 완료. 다음 SSH 로그인부터 연결된 계정이 자동 선택됩니다.
+```
+
+- **Enter 또는 Y:** 현재 개발 서버에 접속한 SSH 인증키를 새 계정에 연결. 다음 SSH 로그인부터 자동 선택.
+- **n:** 개인 계정만 등록. **현재 세션에서는 사용 가능**, 다음 SSH 로그인은 기존 SSH 바인딩을 유지 (미등록이면 `default`).
+- **bind 질문에서 입력 종료(EOF):** 안전하게 bind를 생략하며, 등록된 계정은 유지.
+- **인증 실패·취소:** 새 프로필은 등록되지 않고 해당 세션은 **공용 `default`로 복귀**. 기존 SSH 바인딩과 공용 계정 권한은 그대로 유지.
+- `SSH_USER_AUTH` 정보가 없어 bind에 실패하면 계정 등록은 유지되며, SSH 서버의 `ExposeAuthInfo yes`를 확인한 후 `sgh bind alice`를 다시 실행.
+
+계정 이름과 호스트를 미리 알고 있다면 다음도 가능합니다. 나머지 인증 및 bind 여부 확인은 동일합니다.
+
+```bash
+sgh init alice github.corp.example
+```
+
+기존 수동 절차도 계속 지원합니다:
+
+```bash
+sgh add alice https://github.corp.example/
 sgh bind alice
-
-# 다음 접속부터는 자동으로 alice 선택
-sgh list
 sgh status
 ```
 
@@ -157,6 +183,7 @@ sgh status
 다른 프로필도 등록할 수 있습니다:
 
 ```bash
+sgh init  # 또는 아래처럼 수동 등록
 sgh add bob
 sgh swap bob
 sgh swap alice
@@ -172,6 +199,7 @@ sgh bind default        # 해당 SSH 키는 항상 공용 default로 시작
 
 | 명령어 | 설명 |
 |---|---|
+| `sgh init [NAME [HOST]]` | 대화형 개인 계정 등록 → GitHub 인증 → SSH bind 여부 확인 (기본 Y) |
 | `sgh list` | 등록된 프로필과 현재 세션 선택 |
 | `sgh add NAME [HOST]` | 개인 프로필 등록, HOST 생략 시 default 호스트를 사용 (동일 이름 중복 불가) |
 | `sgh swap NAME` | 현재 SSH 세션의 프로필 전환 (`default` 포함) |
@@ -189,7 +217,11 @@ sgh bind default        # 해당 SSH 키는 항상 공용 default로 시작
 # 공용 default가 GHE를 사용한다면 관리자가 1회 설정
 sgh init-default github.corp.example
 
-# 개인 프로필은 공용 default의 호스트를 상속하거나 직접 지정
+
+# 처음 등록하는 사용자라면 sgh init 한 번으로 인증 + SSH 바인딩까지 진행
+sgh init
+
+# 수동 등록 시 공용 default의 호스트를 상속하거나 직접 지정
 sgh add alice                         # default 호스트 사용
 sgh add bob github.corp.example
 sgh swap bob
@@ -211,7 +243,8 @@ Git 원격 주소는 `https://github.corp.example/ORG/REPO.git`이어야 합니�
 | 같은 사용자의 터미널 2개 | 서로 다른 프로필로 `sgh swap` 가능 |
 | 동일한 프로필을 두 사람이 동시에 등록/재인증 | `flock`으로 중복 등록 방지 |
 | 사용자가 개인 프로필 등록 없이 접속 | **default 사용 가능** — Git/gh 작업 모두 허용 |
-| 개인 OAuth 등록 취소/중단 | 최종 프로필이 생성되지 않음; 현재 세션은 **default** |
+| `sgh init` OAuth 등록 취소/중단 | 최종 프로필이 생성되지 않음; 현재 세션은 **default**, 기존 SSH 바인딩 유지 |
+| `sgh init` bind 질문에서 `n` 또는 EOF | 계정은 등록되고 현재 세션에서 사용 가능; 기존 SSH 바인딩을 변경하지 않음 |
 | `sgh swap`에 없는 이름 입력 | **default**로 전환, 명령은 오류 코드 반환 |
 | 개인 GitHub 토큰 만료·오류·계정 불일치 | 자동으로 **default** 전환 후 원래 명령 1회 실행, 경고 출력 |
 | default GitHub 인증 실패 | GitHub 작업은 기존 Git/gh의 인증 오류를 출력. `git commit` 같은 로컬 작업은 default 작성자로 계속 실행 가능 |
@@ -226,7 +259,7 @@ bash -n bin/sgh lib/*.sh guard-bin/* scripts/*.sh tests/*.sh
 bash tests/test_sgh.sh
 ```
 
-네트워크 없이 모의 `gh`와 2개 SSH 공개키를 사용해 다음을 검사합니다: 공용 계정 유지, SSH 자동 선택, 여러 세션 동시 실행, Git 커밋 작성자, `git credential fill` 계정별 반환, `gh pr merge`, 수동 swap, 토큰 철회 시 default 복귀, 로그인 실패 후 default 사용, **GHE hostname OAuth/credential helper/이메일**, 구형 프로필 호환, zsh 설치 시 zsh 시작 셸. **실제 서버 OpenSSH 로그인의 완전한 동작과 GitHub OAuth 성공까지 입증하는 테스트는 아닙니다.** 설치 전 테스트 서버에서 검증하세요.
+네트워크 없이 모의 `gh`와 2개 SSH 공개키를 사용해 다음을 검사합니다: 공용 계정 유지, SSH 자동 선택, 여러 세션 동시 실행, Git 커밋 작성자, `git credential fill` 계정별 반환, `gh pr merge`, 수동 swap, 토큰 철회 시 default 복귀, 로그인 실패 후 default 사용, **GHE hostname OAuth/credential helper/이메일**, 구형 프로필 호환, **`sgh init`의 Y/n/EOF/인증 실패**, zsh 설치 시 zsh 시작 셸. **실제 서버 OpenSSH 로그인의 완전한 동작과 GitHub OAuth 성공까지 입증하는 테스트는 아닙니다.** 설치 전 테스트 서버에서 검증하세요.
 
 ## 운영 주의사항
 

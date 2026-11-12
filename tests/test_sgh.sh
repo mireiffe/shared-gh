@@ -264,6 +264,71 @@ BASH
 run_actor bob "$TMP/reset-default.sh" > "$TMP/reset-default.out" || { cat "$TMP/bob.stderr" "$TMP/reset-default.out"; fail 'reset GitHub.com default'; }
 echo 'PASS: enterprise default can commit/push using its host-specific credentials.'
 
+# Guided setup: name + GHE URL + OAuth + default-YES SSH bind.
+cat > "$TMP/wizard-yes.sh" <<'BASH'
+printf 'wizard-work\nhttps://GHE.team.example/\n\n\n\n' | sgh init
+[[ "$(sgh_current)" == wizard-work ]]
+[[ "$(sed -n '4p' "$SGH_HOME/profiles/wizard-work/profile")" == ghe.team.example ]]
+id="$(sgh_ssh_key_id)"
+[[ "$(cat "$SGH_BINDINGS/$id")" == wizard-work ]]
+[[ "$(gh api user --jq .login)" == wizarduser ]]
+printf 'protocol=https\nhost=ghe.team.example\n\n' | git credential fill | grep -q 'password=token_wizarduser'
+BASH
+run_actor alice "$TMP/wizard-yes.sh" MOCK_LOGIN=wizarduser MOCK_EMAIL=wizard@team.example > "$TMP/wizard-yes.out" || { cat "$TMP/alice.stderr" "$TMP/wizard-yes.out"; fail 'guided init YES binding'; }
+grep -q '초기 설정 완료' "$TMP/wizard-yes.out" || fail 'guided init completion summary'
+cat > "$TMP/wizard-yes-verify.sh" <<'BASH'
+[[ "$(sgh_current)" == wizard-work ]]
+BASH
+run_actor alice "$TMP/wizard-yes-verify.sh" > "$TMP/wizard-yes-verify.out" || fail 'guided init binding next SSH login'
+echo 'PASS: sgh init guides GHE OAuth and default-YES bind; next session auto-selects the new profile.'
+
+# Choosing n stores a usable profile, but does not change the SSH-key binding.
+cat > "$TMP/wizard-no.sh" <<'BASH'
+id="$(sgh_ssh_key_id)"
+previous="$(cat "$SGH_BINDINGS/$id")"
+printf 'manual-only\n\n\n\nn\n' | sgh init
+[[ "$(sgh_current)" == manual-only ]]
+[[ "$(cat "$SGH_BINDINGS/$id")" == "$previous" ]]
+[[ "$(gh api user --jq .login)" == manualuser ]]
+BASH
+run_actor bob "$TMP/wizard-no.sh" MOCK_LOGIN=manualuser > "$TMP/wizard-no.out" || { cat "$TMP/bob.stderr" "$TMP/wizard-no.out"; fail 'guided init NO binding'; }
+cat > "$TMP/wizard-no-verify.sh" <<'BASH'
+[[ "$(sgh_current)" == bob ]]
+BASH
+run_actor bob "$TMP/wizard-no-verify.sh" > "$TMP/wizard-no-verify.out" || fail 'NO binding must leave old SSH mapping unchanged'
+echo 'PASS: sgh init with n registers profile without changing the existing SSH key binding.'
+
+# EOF at bind prompt should NEVER be implicitly treated as "yes".
+cat > "$TMP/wizard-eof.sh" <<'BASH'
+id="$(sgh_ssh_key_id)"
+previous="$(cat "$SGH_BINDINGS/$id")"
+printf 'no-answer\n\n\n\n' | sgh init
+[[ "$(sgh_current)" == no-answer ]]
+[[ "$(cat "$SGH_BINDINGS/$id")" == "$previous" ]]
+BASH
+run_actor bob "$TMP/wizard-eof.sh" MOCK_LOGIN=noanswer > "$TMP/wizard-eof.out" || { cat "$TMP/bob.stderr" "$TMP/wizard-eof.out"; fail 'EOF bind prompt'; }
+echo 'PASS: EOF at bind prompt skips binding instead of authorizing it.'
+
+# Auth failure in guided setup must leave the default writable and never bind.
+cat > "$TMP/wizard-fail.sh" <<'BASH'
+id="$(sgh_ssh_key_id)"
+previous="$(cat "$SGH_BINDINGS/$id")"
+if printf 'broken-wizard\nhttps://ghe.team.example/\n' | sgh init; then exit 11; fi
+[[ "$(sgh_current)" == default ]]
+[[ ! -e "$SGH_PROFILES/broken-wizard/profile" ]]
+[[ "$(cat "$SGH_BINDINGS/$id")" == "$previous" ]]
+git -C "$TEST_TMP/repos/B" commit --allow-empty -qm wizard_fallback
+BASH
+run_actor bob "$TMP/wizard-fail.sh" MOCK_LOGIN=baduser MOCK_AUTH_FAIL=1 > "$TMP/wizard-fail.out" || { cat "$TMP/bob.stderr"; fail 'guided init auth failure fallback'; }
+[[ "$("$REAL_GIT" -C "$TMP/repos/B" log -1 --format='%an <%ae>')" == 'Shared Account <shared@example.com>' ]] || fail 'guided init fallback author'
+echo 'PASS: failed sgh init OAuth keeps default writable and does not change SSH key binding.'
+
+# Restore Alice's binding so the existing zsh SSH login regression still applies.
+cat > "$TMP/wizard-restore.sh" <<'BASH'
+sgh bind alice
+BASH
+run_actor alice "$TMP/wizard-restore.sh" > "$TMP/wizard-restore.out" || fail 'restore Alice SSH binding after wizard coverage'
+
 # zsh needs to be installed in CI; locally skip if absent.
 if command -v zsh >/dev/null; then
   cat > "$TMP/zsh-check.zsh" <<'ZSH'
