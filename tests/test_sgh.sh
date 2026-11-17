@@ -451,4 +451,72 @@ run_orca "$TMP/repos/orca-wizard" "$TMP/orca-wizard.sh" MOCK_LOGIN=orca-dev > "$
 grep -q '모든 사용자에게 적용' "$TMP/orca-wizard.out" || fail 'worktree sharing not disclosed in wizard'
 echo 'PASS: Orca init requests explicit workspace-wide consent before persistent auto-selection.'
 
+# Login help is displayed only when a human-facing (TTY) session has no
+# persistent identity mapping. Orca's background `shell -ic` probes are often
+# not attached to a PTY and must not receive this message.
+if command -v script >/dev/null; then
+  pty_login() {
+    local actor="$1" wd="$2"; shift 2
+    local -a auth_env=(-u SSH_CONNECTION -u SSH_CLIENT -u SSH_TTY -u SSH_USER_AUTH)
+    if [[ "$actor" != none ]]; then
+      auth_env+=(SSH_CONNECTION='1 2 3 4' SSH_USER_AUTH="$TMP/$actor.auth")
+    fi
+    env -u SGH_CONTEXT -u SGH_SESSION_READY -u SGH_SESSION_SHELL_PID "${auth_env[@]}" \
+      HOME="$HD" SGH_HOME="$HD/.local/share/sgh" PATH="$TMP/bin:$PATH" "$@" \
+      timeout 12 script -q -e -c "bash --noprofile --norc -ic \"cd '$wd'; source '$APP/lib/session.sh'\"" /dev/null </dev/null
+  }
+
+  # An unbound SSH key gets an actionable welcome, without affecting default.
+  a_id="$(awk '{print $2, $3}' "$TMP/alice.auth" | "$TMP/bin/ssh-keygen" -lf - -E sha256 2>/dev/null | awk '{print $2}' | tr -d '\n' | sha256sum | cut -c1-24)"
+  a_binding="$HD/.local/share/sgh/bindings/$a_id"
+  [[ -f "$a_binding" ]] || fail 'expected Alice SSH binding'
+  cp "$a_binding" "$TMP/saved-alice-binding"
+  rm "$a_binding"
+  pty_login alice "$TMP/repos/A" > "$TMP/onboard-ssh.out" || fail 'unbound SSH PTY login'
+  grep -q '접속할 때마다 내 GitHub 계정으로 자동 연결하고 싶다면?' "$TMP/onboard-ssh.out" || fail 'SSH onboarding question missing'
+  grep -q 'sgh init' "$TMP/onboard-ssh.out" || fail 'SSH onboarding command missing'
+  grep -q 'sgh bind <계정명>' "$TMP/onboard-ssh.out" || fail 'rebind instruction missing'
+  grep -q '공용 default 계정' "$TMP/onboard-ssh.out" || fail 'default fallback not explained'
+
+  # Orca's background non-TTY probes must not receive the onboarding text.
+  cat > "$TMP/probe.sh" <<'BASH'
+[[ "$(sgh_current)" == default ]]
+BASH
+  run_actor alice "$TMP/probe.sh" > "$TMP/non-tty-probe.out" || fail 'non-TTY probe'
+  ! grep -q '접속할 때마다' "$TMP/non-tty-probe.out" || fail 'non-TTY probe polluted by guide'
+
+  # A user can explicitly opt out of the hint for CLI-style interactive shells.
+  pty_login alice "$TMP/repos/A" SGH_HIDE_SETUP_HINT=1 > "$TMP/onboard-hidden.out" || fail 'hint suppression'
+  ! grep -q '접속할 때마다' "$TMP/onboard-hidden.out" || fail 'hint suppression ignored'
+
+  # Explicit default binding is configured; it should be quiet, too.
+  echo default > "$a_binding"
+  pty_login alice "$TMP/repos/A" > "$TMP/onboard-bound-default.out" || fail 'bound default PTY login'
+  ! grep -q '접속할 때마다' "$TMP/onboard-bound-default.out" || fail 'explicit default binding got onboarding'
+  cp "$TMP/saved-alice-binding" "$a_binding"
+  pty_login alice "$TMP/repos/A" > "$TMP/onboard-bound-alice.out" || fail 'bound Alice PTY login'
+  ! grep -q '접속할 때마다' "$TMP/onboard-bound-alice.out" || fail 'bound Alice got onboarding'
+  grep -q '자동 선택: alice' "$TMP/onboard-bound-alice.out" || fail 'bound Alice identity not restored'
+  echo 'PASS: TTY-only first-login guidance is skipped for both personal and explicit default bindings.'
+
+  # Orca without SSH identity still gets usable instructions, without
+  # pretending that a shared worktree is the person's SSH identity.
+  "$REAL_GIT" init -q "$TMP/repos/orca-guide"
+  pty_login none "$TMP/repos/orca-guide" > "$TMP/onboard-orca.out" || fail 'unbound Orca PTY login'
+  grep -q 'sgh init' "$TMP/onboard-orca.out" || fail 'Orca guide missing sgh init'
+  grep -q 'SSH 인증키 정보를 받지 못했습니다' "$TMP/onboard-orca.out" || fail 'Orca SSH limitation missing'
+  grep -q 'sgh swap <계정명>' "$TMP/onboard-orca.out" || fail 'Orca swap missing'
+  grep -q '다른 사람에게도 적용' "$TMP/onboard-orca.out" || fail 'worktree warning missing'
+  cat > "$TMP/orca-guide-bind.sh" <<'BASH'
+sgh bind-worktree alice
+BASH
+  run_orca "$TMP/repos/orca-guide" "$TMP/orca-guide-bind.sh" > "$TMP/orca-guide-bind.out" || fail 'Orca guide worktree binding'
+  pty_login none "$TMP/repos/orca-guide" > "$TMP/onboard-orca-bound.out" || fail 'bound Orca PTY login'
+  ! grep -q '접속할 때마다' "$TMP/onboard-orca-bound.out" || fail 'worktree-bound Orca got onboarding'
+  grep -q '자동 선택: alice' "$TMP/onboard-orca-bound.out" || fail 'Orca worktree selection missing'
+  echo 'PASS: Orca setup hint documents SSH limitations, and a configured worktree is quiet.'
+else
+  echo 'SKIP: script(1) unavailable; PTY onboarding tests not run.'
+fi
+
 echo 'ALL OFFLINE SGH TESTS PASSED.' 
